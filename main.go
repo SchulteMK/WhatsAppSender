@@ -2,19 +2,20 @@ package main
 
 import (
 	"database/sql"
+	"encoding/gob"
+	"fmt"
+	"github.com/Baozisoftware/qrcode-terminal-go"
 	"github.com/Rhymen/go-whatsapp"
 	_ "github.com/go-sql-driver/mysql"
-	"time"
-	"fmt"
 	"os"
-	"github.com/Baozisoftware/qrcode-terminal-go"
-	"encoding/gob"
+	"time"
+	"net/url"
 )
 
 func main() {
 	x := &hanlder{}
 	var err error
-	x.db, err = sql.Open("mysql", "root@/whatsapp")
+	x.db, err = sql.Open("mysql", "root@(Marcel-PC-1:3306)/whatsapp")
 	if err != nil {
 		panic(err)
 	}
@@ -51,23 +52,71 @@ func (h *hanlder) HandleImageMessage(message whatsapp.ImageMessage) {
 		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
 		return
 	}
-	_, err = h.db.Exec("CALL whatsapp.insert_image((?),(?),(?),from_unixtime((?)),(?),(?),(?),(?),(?),(?),(?),(?))",
-		message.Info.Id,
+	h.insertMedia(message.Info.Id,
 		message.Info.RemoteJid,
 		message.Info.FromMe,
 		message.Info.Timestamp,
 		message.Caption,
 		message.Thumbnail,
 		message.Type,
-		nil,
-		nil,
-		nil,
-		nil,
 		data)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
-		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
+}
+
+func (h *hanlder) HandleVideoMessage(message whatsapp.VideoMessage) {
+	if h.alreadyExists(message.Info.Id) {
+		return
 	}
+	data, err := message.Download()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
+		return
+	}
+	h.insertMedia(message.Info.Id,
+		message.Info.RemoteJid,
+		message.Info.FromMe,
+		message.Info.Timestamp,
+		message.Caption,
+		message.Thumbnail,
+		message.Type,
+		data)
+}
+
+func (h *hanlder) HandleAudioMessage(message whatsapp.AudioMessage) {
+	if h.alreadyExists(message.Info.Id) {
+		return
+	}
+	data, err := message.Download()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
+		return
+	}
+	h.insertMedia(message.Info.Id,
+		message.Info.RemoteJid,
+		message.Info.FromMe,
+		message.Info.Timestamp,
+		"",
+		nil,
+		message.Type,
+		data)
+}
+
+func (h *hanlder) HandleDocumentMessage(message whatsapp.DocumentMessage) {
+	if h.alreadyExists(message.Info.Id) {
+		return
+	}
+	data, err := message.Download()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
+		return
+	}
+	h.insertMedia(message.Info.Id,
+		message.Info.RemoteJid,
+		message.Info.FromMe,
+		message.Info.Timestamp,
+		message.Title,
+		message.Thumbnail,
+		message.Type,
+		data)
 }
 
 func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
@@ -76,7 +125,8 @@ func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
 		message.Info.RemoteJid,
 		message.Info.FromMe,
 		message.Info.Timestamp,
-		message.Text)
+		url.QueryEscape(message.Text))
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
 		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
@@ -86,6 +136,7 @@ func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
 func (*hanlder) HandleError(err error) {
 	panic("implement me")
 }
+
 func (h *hanlder) alreadyExists(id string) bool {
 	var count int
 	err := h.db.QueryRow("SELECT COUNT(*) FROM message_info WHERE id = (?)", id).Scan(&count)
@@ -98,6 +149,20 @@ func (h *hanlder) alreadyExists(id string) bool {
 		return true
 	}
 	return false
+}
+func (h *hanlder) insertMedia(id, remotejid string, fromme bool, timestamp uint64, caption string, thumbnail []byte, mime string, data []byte) {
+	_, err := h.db.Exec("CALL whatsapp.insert_media((?),(?),(?),from_unixtime((?)),(?),(?),(?),(?))",
+		id,
+		remotejid,
+		fromme,
+		timestamp,
+		caption,
+		thumbnail,
+		mime,
+		data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
+	}
 }
 
 func login(wac *whatsapp.Conn) error {
