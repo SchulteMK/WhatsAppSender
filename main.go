@@ -42,6 +42,34 @@ type hanlder struct {
 	db *sql.DB
 }
 
+func (h *hanlder) HandleImageMessage(message whatsapp.ImageMessage) {
+	if h.alreadyExists(message.Info.Id) {
+		return
+	}
+	data, err := message.Download()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
+		return
+	}
+	_, err = h.db.Exec("CALL whatsapp.insert_image((?),(?),(?),from_unixtime((?)),(?),(?),(?),(?),(?),(?),(?),(?))",
+		message.Info.Id,
+		message.Info.RemoteJid,
+		message.Info.FromMe,
+		message.Info.Timestamp,
+		message.Caption,
+		message.Thumbnail,
+		message.Type,
+		nil,
+		nil,
+		nil,
+		nil,
+		data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
+		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
+	}
+}
+
 func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
 	_, err := h.db.Exec("CALL whatsapp.insert_text((?),(?),(?),from_unixtime((?)),(?))",
 		message.Info.Id,
@@ -57,6 +85,19 @@ func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
 
 func (*hanlder) HandleError(err error) {
 	panic("implement me")
+}
+func (h *hanlder) alreadyExists(id string) bool {
+	var count int
+	err := h.db.QueryRow("SELECT COUNT(*) FROM message_info WHERE id = (?)", id).Scan(&count)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sql error: %v\n", err)
+		return false
+	}
+
+	if count > 0 {
+		return true
+	}
+	return false
 }
 
 func login(wac *whatsapp.Conn) error {
