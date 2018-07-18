@@ -10,11 +10,17 @@ import (
 	"os"
 	"time"
 	"net/url"
+	"github.com/gorilla/mux"
+	"net/http"
+	"strconv"
+	"encoding/json"
 )
 
 func main() {
-	x := &hanlder{}
+	x := &handler{}
 	var err error
+
+	//SQL Connection
 	x.db, err = sql.Open("mysql", "root@(Marcel-PC-1:3306)/whatsapp")
 	if err != nil {
 		panic(err)
@@ -36,14 +42,97 @@ func main() {
 		return
 	}
 
+	r := mux.NewRouter()
+	r.HandleFunc("/media/{messageID}/meta", x.GetMediaMeta).Methods("GET")
+	r.HandleFunc("/media/{messageID}/data", x.GetMediaData).Methods("GET")
+
+	http.ListenAndServe(":8080", r)
 	select {}
 }
 
-type hanlder struct {
+type handler struct {
 	db *sql.DB
 }
 
-func (h *hanlder) HandleImageMessage(message whatsapp.ImageMessage) {
+type Media struct {
+	Id        int
+	Caption   string
+	Mimetype  string
+	Thumbnail []byte
+}
+
+func (h *handler) GetMediaMeta(res http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	ids, ok := vars["messageID"]
+	if !ok {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.Atoi(ids)
+	if err != nil {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r, err := h.db.Query("SELECT id,caption,mimetype,thumbnail FROM media WHERE id = (?)", id)
+	defer r.Close()
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	if !r.Next() {
+		res.WriteHeader(http.StatusNotFound)
+		return
+	}
+	var m Media
+	err = r.Scan(&m.Id, &m.Caption, &m.Mimetype, &m.Thumbnail)
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	res.Write(data)
+	res.WriteHeader(http.StatusOK)
+	fmt.Printf("%v\n%v\n", req, id)
+}
+
+func (h *handler) GetMediaData(res http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	ids, ok := vars["messageID"]
+	if !ok {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.Atoi(ids)
+	if err != nil {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r, err := h.db.Query("SELECT data FROM media WHERE id = (?)", id)
+	defer r.Close()
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	if !r.Next() {
+		res.WriteHeader(http.StatusNotFound)
+		return
+	}
+	var data []byte
+	err = r.Scan(&data)
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+
+	res.Write(data)
+	res.WriteHeader(http.StatusOK)
+	fmt.Printf("%v\n%v\n", req, id)
+}
+
+func (h *handler) HandleImageMessage(message whatsapp.ImageMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -62,7 +151,7 @@ func (h *hanlder) HandleImageMessage(message whatsapp.ImageMessage) {
 		data)
 }
 
-func (h *hanlder) HandleVideoMessage(message whatsapp.VideoMessage) {
+func (h *handler) HandleVideoMessage(message whatsapp.VideoMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -81,7 +170,7 @@ func (h *hanlder) HandleVideoMessage(message whatsapp.VideoMessage) {
 		data)
 }
 
-func (h *hanlder) HandleAudioMessage(message whatsapp.AudioMessage) {
+func (h *handler) HandleAudioMessage(message whatsapp.AudioMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -100,7 +189,7 @@ func (h *hanlder) HandleAudioMessage(message whatsapp.AudioMessage) {
 		data)
 }
 
-func (h *hanlder) HandleDocumentMessage(message whatsapp.DocumentMessage) {
+func (h *handler) HandleDocumentMessage(message whatsapp.DocumentMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -119,7 +208,7 @@ func (h *hanlder) HandleDocumentMessage(message whatsapp.DocumentMessage) {
 		data)
 }
 
-func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
+func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 	_, err := h.db.Exec("CALL whatsapp.insert_text((?),(?),(?),from_unixtime((?)),(?))",
 		message.Info.Id,
 		message.Info.RemoteJid,
@@ -133,11 +222,11 @@ func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
 	}
 }
 
-func (*hanlder) HandleError(err error) {
+func (*handler) HandleError(err error) {
 	panic("implement me")
 }
 
-func (h *hanlder) alreadyExists(id string) bool {
+func (h *handler) alreadyExists(id string) bool {
 	var count int
 	err := h.db.QueryRow("SELECT COUNT(*) FROM message_info WHERE id = (?)", id).Scan(&count)
 	if err != nil {
@@ -150,7 +239,7 @@ func (h *hanlder) alreadyExists(id string) bool {
 	}
 	return false
 }
-func (h *hanlder) insertMedia(id, remotejid string, fromme bool, timestamp uint64, caption string, thumbnail []byte, mime string, data []byte) {
+func (h *handler) insertMedia(id, remotejid string, fromme bool, timestamp uint64, caption string, thumbnail []byte, mime string, data []byte) {
 	_, err := h.db.Exec("CALL whatsapp.insert_media((?),(?),(?),from_unixtime((?)),(?),(?),(?),(?))",
 		id,
 		remotejid,
