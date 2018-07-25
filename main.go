@@ -163,6 +163,7 @@ func (h *hanlder) insertMedia(id, remotejid string, fromme bool, timestamp uint6
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
 	}
+	fmt.Printf("downloaded media: %v  %v\n", time.Unix(int64(timestamp), 0), remotejid)
 }
 
 func login(wac *whatsapp.Conn) error {
