@@ -10,11 +10,19 @@ import (
 	"os"
 	"time"
 	"net/url"
+	"github.com/gorilla/mux"
+	"net/http"
+	"strconv"
+	"encoding/json"
+	"io/ioutil"
+	"bytes"
 )
 
 func main() {
-	x := &hanlder{}
+	x := &handler{}
 	var err error
+
+	//SQL Connection
 	x.db, err = sql.Open("mysql", "root@(Marcel-PC-1:3306)/whatsapp")
 	if err != nil {
 		panic(err)
@@ -36,14 +44,137 @@ func main() {
 		return
 	}
 
+	r := mux.NewRouter()
+	r.HandleFunc("/media/{messageID}/meta", x.GetMediaMeta).Methods("GET")
+	r.HandleFunc("/media/{messageID}/data", x.GetMediaData).Methods("GET")
+	r.HandleFunc("/addHandler/", x.RegisterHandler).Methods("POST")
+
+	http.ListenAndServe(":8080", r)
 	select {}
 }
 
-type hanlder struct {
-	db *sql.DB
+type handler struct {
+	db       *sql.DB
+	handlers []MessageHandler
 }
 
-func (h *hanlder) HandleImageMessage(message whatsapp.ImageMessage) {
+type MediaMetaData struct {
+	Id        int
+	Caption   string
+	Mimetype  string
+	Thumbnail []byte
+}
+
+type MessageHandler struct {
+	Url      string
+	Audio    bool
+	Document bool
+	Image    bool
+	Text     bool
+	Video    bool
+}
+
+type MessageType int8
+
+const (
+	Text MessageType = iota
+	Image
+	Video
+	Audio
+	Document
+)
+
+func (h *handler) GetMediaMeta(res http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	ids, ok := vars["messageID"]
+	if !ok {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.Atoi(ids)
+	if err != nil {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r, err := h.db.Query("SELECT id,caption,mimetype,thumbnail FROM media WHERE id = (?)", id)
+	defer r.Close()
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	if !r.Next() {
+		res.WriteHeader(http.StatusNotFound)
+		return
+	}
+	var m MediaMetaData
+	err = r.Scan(&m.Id, &m.Caption, &m.Mimetype, &m.Thumbnail)
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	res.Write(data)
+	res.WriteHeader(http.StatusOK)
+	fmt.Printf("%v\n%v\n", req, id)
+}
+
+func (h *handler) GetMediaData(res http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	ids, ok := vars["messageID"]
+	if !ok {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.Atoi(ids)
+	if err != nil {
+		res.Write([]byte("no valid id provided."))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r, err := h.db.Query("SELECT data FROM media WHERE id = (?)", id)
+	defer r.Close()
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+	if !r.Next() {
+		res.WriteHeader(http.StatusNotFound)
+		return
+	}
+	var data []byte
+	err = r.Scan(&data)
+	if err != nil {
+		res.Write([]byte(fmt.Sprint(err)))
+	}
+
+	res.Write(data)
+	res.WriteHeader(http.StatusOK)
+	fmt.Printf("%v\n%v\n", req, id)
+}
+
+func (h *handler) RegisterHandler(res http.ResponseWriter, req *http.Request) {
+	body := req.Body
+	defer body.Close()
+	data, err := ioutil.ReadAll(body)
+	if err != nil {
+		res.Write([]byte(err.Error()))
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var mHandler MessageHandler
+	err = json.Unmarshal(data, &mHandler)
+	if err != nil {
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	h.handlers = append(h.handlers, mHandler)
+	res.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) HandleImageMessage(message whatsapp.ImageMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -60,9 +191,10 @@ func (h *hanlder) HandleImageMessage(message whatsapp.ImageMessage) {
 		message.Thumbnail,
 		message.Type,
 		data)
+	h.NotifyHandlers(message.Info.Id, Image)
 }
 
-func (h *hanlder) HandleVideoMessage(message whatsapp.VideoMessage) {
+func (h *handler) HandleVideoMessage(message whatsapp.VideoMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -79,9 +211,10 @@ func (h *hanlder) HandleVideoMessage(message whatsapp.VideoMessage) {
 		message.Thumbnail,
 		message.Type,
 		data)
+	h.NotifyHandlers(message.Info.Id, Video)
 }
 
-func (h *hanlder) HandleAudioMessage(message whatsapp.AudioMessage) {
+func (h *handler) HandleAudioMessage(message whatsapp.AudioMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -98,9 +231,10 @@ func (h *hanlder) HandleAudioMessage(message whatsapp.AudioMessage) {
 		nil,
 		message.Type,
 		data)
+	h.NotifyHandlers(message.Info.Id, Audio)
 }
 
-func (h *hanlder) HandleDocumentMessage(message whatsapp.DocumentMessage) {
+func (h *handler) HandleDocumentMessage(message whatsapp.DocumentMessage) {
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -117,9 +251,10 @@ func (h *hanlder) HandleDocumentMessage(message whatsapp.DocumentMessage) {
 		message.Thumbnail,
 		message.Type,
 		data)
+	h.NotifyHandlers(message.Info.Id, Document)
 }
 
-func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
+func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 	_, err := h.db.Exec("CALL whatsapp.insert_text((?),(?),(?),from_unixtime((?)),(?))",
 		message.Info.Id,
 		message.Info.RemoteJid,
@@ -131,13 +266,72 @@ func (h *hanlder) HandleTextMessage(message whatsapp.TextMessage) {
 		fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
 		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
 	}
+	h.NotifyHandlers(message.Info.Id, Text)
 }
 
-func (*hanlder) HandleError(err error) {
+func (h *handler) NotifyHandlers(id string, t MessageType) {
+	msg := getMessgeInfoFromDB(id)
+	switch t {
+	case Text:
+		for _, v := range h.handlers {
+			if v.Text {
+				v.Notify(msg)
+			}
+		}
+	case Image:
+		for _, v := range h.handlers {
+			if v.Image {
+				v.Notify(msg)
+			}
+		}
+	case Video:
+		for _, v := range h.handlers {
+			if v.Video {
+				v.Notify(msg)
+			}
+		}
+	case Audio:
+		for _, v := range h.handlers {
+			if v.Audio {
+				v.Notify(msg)
+			}
+		}
+	case Document:
+		for _, v := range h.handlers {
+			if v.Document {
+				v.Notify(msg)
+			}
+		}
+	}
+}
+
+func getMessgeInfoFromDB(s string) []byte {
+	return []byte{2, 4, 5, 6}
+}
+
+func (m *MessageHandler) Notify(msg []byte) {
+	req, err := http.NewRequest("POST", m.Url, bytes.NewBuffer(msg))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		//cannot connect
+		return
+	}
+	defer resp.Body.Close()
+
+	fmt.Println("response Status:", resp.Status)
+	fmt.Println("response Headers:", resp.Header)
+	body, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println("response Body:", string(body))
+}
+
+func (h *handler) HandleError(err error) {
 	panic("implement me")
 }
 
-func (h *hanlder) alreadyExists(id string) bool {
+func (h *handler) alreadyExists(id string) bool {
 	var count int
 	err := h.db.QueryRow("SELECT COUNT(*) FROM message_info WHERE id = (?)", id).Scan(&count)
 	if err != nil {
@@ -150,7 +344,8 @@ func (h *hanlder) alreadyExists(id string) bool {
 	}
 	return false
 }
-func (h *hanlder) insertMedia(id, remotejid string, fromme bool, timestamp uint64, caption string, thumbnail []byte, mime string, data []byte) {
+
+func (h *handler) insertMedia(id, remotejid string, fromme bool, timestamp uint64, caption string, thumbnail []byte, mime string, data []byte) {
 	_, err := h.db.Exec("CALL whatsapp.insert_media((?),(?),(?),from_unixtime((?)),(?),(?),(?),(?))",
 		id,
 		remotejid,
