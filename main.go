@@ -29,16 +29,16 @@ func main() {
 	}
 
 	//create new WhatsApp connection
-	wac, err := whatsapp.NewConn(5 * time.Second)
+	x.wac, err = whatsapp.NewConn(5 * time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating connection: %v\n", err)
 		return
 	}
 
 	//Add handler
-	wac.AddHandler(x)
+	x.wac.AddHandler(x)
 
-	err = login(wac)
+	err = login(x.wac)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error logging in: %v\n", err)
 		return
@@ -49,13 +49,19 @@ func main() {
 	r.HandleFunc("/media/{messageID}/data", x.GetMediaData).Methods("GET")
 	r.HandleFunc("/addHandler/", x.RegisterHandler).Methods("POST")
 
-	http.ListenAndServe(":8080", r)
+	//http.ListenAndServe(":8080", r)
+
+	<-time.After(3 * time.Second)
+
+	x.startingTime = uint64(time.Now().Unix())
 	select {}
 }
 
 type handler struct {
-	db       *sql.DB
-	handlers []MessageHandler
+	db           *sql.DB
+	wac          *whatsapp.Conn
+	handlers     []MessageHandler
+	startingTime uint64
 }
 
 type MediaMetaData struct {
@@ -175,6 +181,7 @@ func (h *handler) RegisterHandler(res http.ResponseWriter, req *http.Request) {
 }
 
 func (h *handler) HandleImageMessage(message whatsapp.ImageMessage) {
+	fmt.Printf("Image: %v\n", message)
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -267,10 +274,18 @@ func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
 	}
 	h.NotifyHandlers(message.Info.Id, Text)
+	if h.startingTime != 0 &&
+		message.Info.Timestamp > h.startingTime &&
+		message.Text[0] == '!' {
+		message.Info.Id = ""
+		message.Info.FromMe = true
+		message.Info.Timestamp = 0
+		h.wac.Send(message)
+	}
 }
 
 func (h *handler) NotifyHandlers(id string, t MessageType) {
-	msg := getMessgeInfoFromDB(id)
+	msg := getMessageInfoFromDB(id)
 	switch t {
 	case Text:
 		for _, v := range h.handlers {
@@ -305,7 +320,7 @@ func (h *handler) NotifyHandlers(id string, t MessageType) {
 	}
 }
 
-func getMessgeInfoFromDB(s string) []byte {
+func getMessageInfoFromDB(s string) []byte {
 	return []byte{2, 4, 5, 6}
 }
 
