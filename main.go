@@ -24,7 +24,7 @@ func main() {
 	var err error
 
 	//SQL Connection
-	x.db, err = sql.Open("mysql", "root@(Marcel-PC-1:3306)/whatsapp")
+	x.db, err = sql.Open("mysql", "root@(Marcel-PC-1:3306)/whatsapp?maxAllowedPacket=0")
 	if err != nil {
 		panic(err)
 	}
@@ -55,6 +55,9 @@ func main() {
 	root := "toSend/"
 	for {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
 			if info.IsDir() == false && filepath.Ext(path) == ".txt" {
 				b, _ := ioutil.ReadFile(path)
 				msg := whatsapp.TextMessage{
@@ -63,7 +66,7 @@ func main() {
 					},
 					Text: string(b),
 				}
-				err := wac.Send(msg)
+				err := x.wac.Send(msg)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "error sending: %v", err)
 				}
@@ -203,7 +206,7 @@ func (h *handler) RegisterHandler(res http.ResponseWriter, req *http.Request) {
 }
 
 func (h *handler) HandleImageMessage(message whatsapp.ImageMessage) {
-	fmt.Printf("Image: %v\n", message)
+	fmt.Printf("Image: %v  %v\n", message.Info.Timestamp, message.Info.RemoteJid)
 	if h.alreadyExists(message.Info.Id) {
 		return
 	}
@@ -221,6 +224,7 @@ func (h *handler) HandleImageMessage(message whatsapp.ImageMessage) {
 		message.Type,
 		data)
 	h.NotifyHandlers(message.Info.Id, Image)
+	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 }
 
 func (h *handler) HandleVideoMessage(message whatsapp.VideoMessage) {
@@ -241,6 +245,7 @@ func (h *handler) HandleVideoMessage(message whatsapp.VideoMessage) {
 		message.Type,
 		data)
 	h.NotifyHandlers(message.Info.Id, Video)
+	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 }
 
 func (h *handler) HandleAudioMessage(message whatsapp.AudioMessage) {
@@ -261,6 +266,7 @@ func (h *handler) HandleAudioMessage(message whatsapp.AudioMessage) {
 		message.Type,
 		data)
 	h.NotifyHandlers(message.Info.Id, Audio)
+	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 }
 
 func (h *handler) HandleDocumentMessage(message whatsapp.DocumentMessage) {
@@ -281,28 +287,33 @@ func (h *handler) HandleDocumentMessage(message whatsapp.DocumentMessage) {
 		message.Type,
 		data)
 	h.NotifyHandlers(message.Info.Id, Document)
+	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 }
 
 func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
-	_, err := h.db.Exec("CALL whatsapp.insert_text((?),(?),(?),from_unixtime((?)),(?))",
-		message.Info.Id,
-		message.Info.RemoteJid,
-		message.Info.FromMe,
-		message.Info.Timestamp,
-		url.QueryEscape(message.Text))
+	if message.Info.Status != whatsapp.Read {
+		h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
-		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
-	}
-	h.NotifyHandlers(message.Info.Id, Text)
-	if h.startingTime != 0 &&
-		message.Info.Timestamp > h.startingTime &&
-		message.Text[0] == '!' {
-		message.Info.Id = ""
-		message.Info.FromMe = true
-		message.Info.Timestamp = 0
-		h.wac.Send(message)
+		_, err := h.db.Exec("CALL whatsapp.insert_text((?),(?),(?),from_unixtime((?)),(?))",
+			message.Info.Id,
+			message.Info.RemoteJid,
+			message.Info.FromMe,
+			message.Info.Timestamp,
+			url.QueryEscape(message.Text))
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
+			fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
+		}
+		h.NotifyHandlers(message.Info.Id, Text)
+		if h.startingTime != 0 &&
+			message.Info.Timestamp > h.startingTime &&
+			message.Text[0] == '!' {
+			message.Info.Id = ""
+			message.Info.FromMe = true
+			message.Info.Timestamp = 0
+			h.wac.Send(message)
+		}
 	}
 }
 
@@ -365,7 +376,7 @@ func (m *MessageHandler) Notify(msg []byte) {
 }
 
 func (h *handler) HandleError(err error) {
-	panic("implement me")
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 }
 
 func (h *handler) alreadyExists(id string) bool {
@@ -373,7 +384,7 @@ func (h *handler) alreadyExists(id string) bool {
 	err := h.db.QueryRow("SELECT COUNT(*) FROM message_info WHERE id = (?)", id).Scan(&count)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sql error: %v\n", err)
-		return false
+		panic(err)
 	}
 
 	if count > 0 {
@@ -445,12 +456,16 @@ func readSession() (whatsapp.Session, error) {
 
 func writeSession(session whatsapp.Session) error {
 	file, err := os.Create(os.TempDir() + "/whatsappSession.gob")
+	jfile, err := os.Create(os.TempDir() + "/whatsappSession.json")
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	defer jfile.Close()
 	encoder := gob.NewEncoder(file)
+	jencoder := json.NewEncoder(jfile)
 	err = encoder.Encode(session)
+	err = jencoder.Encode(session)
 	if err != nil {
 		return err
 	}
