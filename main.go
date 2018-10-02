@@ -1,21 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"github.com/Baozisoftware/qrcode-terminal-go"
 	"github.com/Rhymen/go-whatsapp"
 	_ "github.com/go-sql-driver/mysql"
-	"os"
-	"time"
-	"net/url"
 	"github.com/gorilla/mux"
-	"net/http"
-	"strconv"
-	"encoding/json"
 	"io/ioutil"
-	"bytes"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
 )
 
 func main() {
@@ -49,8 +50,32 @@ func main() {
 	r.HandleFunc("/media/{messageID}/data", x.GetMediaData).Methods("GET")
 	r.HandleFunc("/addHandler/", x.RegisterHandler).Methods("POST")
 
-	http.ListenAndServe(":8080", r)
-	select {}
+	//http.ListenAndServe(":8080", r)
+	root := "toSend/"
+	for {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if info.IsDir() == false && filepath.Ext(path) == ".txt" {
+				b, _ := ioutil.ReadFile(path)
+				msg := whatsapp.TextMessage{
+					Info: whatsapp.MessageInfo{
+						RemoteJid: info.Name()[:len(info.Name())-4],
+					},
+					Text: string(b),
+				}
+				err := wac.Send(msg)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error sending: %v", err)
+				}
+				_ = os.Remove(path)
+			}
+			return nil
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error in read loop: %v", err)
+			break
+		}
+		<-time.After(5 * time.Second)
+	}
 }
 
 type handler struct {
