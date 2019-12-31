@@ -7,9 +7,9 @@ import (
 	"github.com/Baozisoftware/qrcode-terminal-go"
 	"github.com/Rhymen/go-whatsapp"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -20,20 +20,18 @@ func main() {
 	//create new WhatsApp connection
 	x.wac, err = whatsapp.NewConn(5 * time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating connection: %v\n", err)
-		return
+		log.Fatalf("error creating connection: %v\n", err)
 	}
+
+	x.startingTime = uint64(time.Now().Unix())
 
 	//Add handler
 	x.wac.AddHandler(x)
 
-	err = login(x.wac)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error logging in: %v\n", err)
-		return
+	if err := login(x.wac); err != nil {
+		log.Fatalf("error logging in: %v\n", err)
 	}
 
-	x.startingTime = uint64(time.Now().Unix())
 	root := "toSend/"
 	for {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -101,7 +99,7 @@ func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 	if message.Info.Status != whatsapp.Read {
 		h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 
-		if h.startingTime != 0 && message.Info.Timestamp > h.startingTime && message.Text[0] == '!' {
+		if message.Info.Timestamp > h.startingTime && message.Text[0] == '!' {
 			message.Info.Id = ""
 			message.Info.FromMe = true
 			message.Info.Timestamp = 0
@@ -111,26 +109,16 @@ func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 }
 
 func (h *handler) HandleError(err error) {
-	if strings.Contains(err.Error(), whatsapp.ErrInvalidWsData.Error()) {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-	session, err := h.wac.Disconnect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error disconnecting: %v\n", err)
-	}
-	if len(session.ClientToken) >= 10 {
-		err = writeSession(session)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing Session: %v\n", err)
+	if e, ok := err.(*whatsapp.ErrConnectionFailed); ok {
+		log.Printf("Connection failed, underlying error: %v", e.Err)
+		log.Println("Waiting 30sec...")
+		<-time.After(30 * time.Second)
+		log.Println("Reconnecting...")
+		if err := h.wac.Restore(); err != nil {
+			log.Fatalf("Restore failed: %v", err)
 		}
-	}
-	fmt.Println("Waiting for reconnect")
-	<-time.After(30 * time.Second)
-	fmt.Println("Reconnecting")
-	err = h.wac.Restore()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error restoring session: %v\n", err)
+	} else {
+		log.Printf("error occoured: %v\n", err)
 	}
 }
 
