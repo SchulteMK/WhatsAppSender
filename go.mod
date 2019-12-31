@@ -1,4 +1,4 @@
-module github.com/SchulteMK/whatsappdb
+module github.com/SchulteMK/WhatsAppSender
 
 go 1.13
 
