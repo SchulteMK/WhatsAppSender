@@ -1,33 +1,21 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/gob"
-	"encoding/json"
 	"fmt"
 	"github.com/Baozisoftware/qrcode-terminal-go"
 	"github.com/Rhymen/go-whatsapp"
-	_ "github.com/go-sql-driver/mysql"
-	"github.com/gorilla/mux"
 	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"time"
 )
 
 func main() {
 	x := &handler{}
 	var err error
-
-	//SQL Connection
-	x.db, err = sql.Open("mysql", "root@(Marcel-PC-1:3306)/whatsapp?maxAllowedPacket=0")
-	if err != nil {
-		panic(err)
-	}
 
 	//create new WhatsApp connection
 	x.wac, err = whatsapp.NewConn(5 * time.Second)
@@ -45,20 +33,14 @@ func main() {
 		return
 	}
 
-	r := mux.NewRouter()
-	r.HandleFunc("/media/{messageID}/meta", x.GetMediaMeta).Methods("GET")
-	r.HandleFunc("/media/{messageID}/data", x.GetMediaData).Methods("GET")
-	r.HandleFunc("/addHandler/", x.RegisterHandler).Methods("POST")
-
 	x.startingTime = uint64(time.Now().Unix())
-	//http.ListenAndServe(":8080", r)
 	root := "toSend/"
 	for {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}
-			if info.IsDir() == false && filepath.Ext(path) == ".txt" {
+			if info.IsDir() == false && filepath.Ext(path) == ".txt" && info.Size() > 0 {
 				b, _ := ioutil.ReadFile(path)
 				msg := whatsapp.TextMessage{
 					Info: whatsapp.MessageInfo{
@@ -66,7 +48,7 @@ func main() {
 					},
 					Text: string(b),
 				}
-				err := x.wac.Send(msg)
+				_, err := x.wac.Send(msg)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "error sending: %v", err)
 				}
@@ -115,200 +97,11 @@ const (
 	Document
 )
 
-func (h *handler) GetMediaMeta(res http.ResponseWriter, req *http.Request) {
-	vars := mux.Vars(req)
-	ids, ok := vars["messageID"]
-	if !ok {
-		res.Write([]byte("no valid id provided."))
-		res.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	id, err := strconv.Atoi(ids)
-	if err != nil {
-		res.Write([]byte("no valid id provided."))
-		res.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	r, err := h.db.Query("SELECT id,caption,mimetype,thumbnail FROM media WHERE id = (?)", id)
-	defer r.Close()
-	if err != nil {
-		res.Write([]byte(fmt.Sprint(err)))
-	}
-	if !r.Next() {
-		res.WriteHeader(http.StatusNotFound)
-		return
-	}
-	var m MediaMetaData
-	err = r.Scan(&m.Id, &m.Caption, &m.Mimetype, &m.Thumbnail)
-	if err != nil {
-		res.Write([]byte(fmt.Sprint(err)))
-	}
-	data, err := json.Marshal(m)
-	if err != nil {
-		res.Write([]byte(fmt.Sprint(err)))
-	}
-	res.Write(data)
-	res.WriteHeader(http.StatusOK)
-	fmt.Printf("%v\n%v\n", req, id)
-}
-
-func (h *handler) GetMediaData(res http.ResponseWriter, req *http.Request) {
-	vars := mux.Vars(req)
-	ids, ok := vars["messageID"]
-	if !ok {
-		res.Write([]byte("no valid id provided."))
-		res.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	id, err := strconv.Atoi(ids)
-	if err != nil {
-		res.Write([]byte("no valid id provided."))
-		res.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	r, err := h.db.Query("SELECT data FROM media WHERE id = (?)", id)
-	defer r.Close()
-	if err != nil {
-		res.Write([]byte(fmt.Sprint(err)))
-	}
-	if !r.Next() {
-		res.WriteHeader(http.StatusNotFound)
-		return
-	}
-	var data []byte
-	err = r.Scan(&data)
-	if err != nil {
-		res.Write([]byte(fmt.Sprint(err)))
-	}
-
-	res.Write(data)
-	res.WriteHeader(http.StatusOK)
-	fmt.Printf("%v\n%v\n", req, id)
-}
-
-func (h *handler) RegisterHandler(res http.ResponseWriter, req *http.Request) {
-	body := req.Body
-	defer body.Close()
-	data, err := ioutil.ReadAll(body)
-	if err != nil {
-		res.Write([]byte(err.Error()))
-		res.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	var mHandler MessageHandler
-	err = json.Unmarshal(data, &mHandler)
-	if err != nil {
-		res.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	h.handlers = append(h.handlers, mHandler)
-	res.WriteHeader(http.StatusOK)
-}
-
-func (h *handler) HandleImageMessage(message whatsapp.ImageMessage) {
-	fmt.Printf("Image: %v  %v\n", message.Info.Timestamp, message.Info.RemoteJid)
-	if h.alreadyExists(message.Info.Id) {
-		return
-	}
-	data, err := message.Download()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
-		return
-	}
-	h.insertMedia(message.Info.Id,
-		message.Info.RemoteJid,
-		message.Info.FromMe,
-		message.Info.Timestamp,
-		message.Caption,
-		message.Thumbnail,
-		message.Type,
-		data)
-	h.NotifyHandlers(message.Info.Id, Image)
-	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
-}
-
-func (h *handler) HandleVideoMessage(message whatsapp.VideoMessage) {
-	if h.alreadyExists(message.Info.Id) {
-		return
-	}
-	data, err := message.Download()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
-		return
-	}
-	h.insertMedia(message.Info.Id,
-		message.Info.RemoteJid,
-		message.Info.FromMe,
-		message.Info.Timestamp,
-		message.Caption,
-		message.Thumbnail,
-		message.Type,
-		data)
-	h.NotifyHandlers(message.Info.Id, Video)
-	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
-}
-
-func (h *handler) HandleAudioMessage(message whatsapp.AudioMessage) {
-	if h.alreadyExists(message.Info.Id) {
-		return
-	}
-	data, err := message.Download()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
-		return
-	}
-	h.insertMedia(message.Info.Id,
-		message.Info.RemoteJid,
-		message.Info.FromMe,
-		message.Info.Timestamp,
-		"",
-		nil,
-		message.Type,
-		data)
-	h.NotifyHandlers(message.Info.Id, Audio)
-	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
-}
-
-func (h *handler) HandleDocumentMessage(message whatsapp.DocumentMessage) {
-	if h.alreadyExists(message.Info.Id) {
-		return
-	}
-	data, err := message.Download()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error downloading image: %v\n", err)
-		return
-	}
-	h.insertMedia(message.Info.Id,
-		message.Info.RemoteJid,
-		message.Info.FromMe,
-		message.Info.Timestamp,
-		message.Title,
-		message.Thumbnail,
-		message.Type,
-		data)
-	h.NotifyHandlers(message.Info.Id, Document)
-	h.wac.Read(message.Info.RemoteJid, message.Info.Id)
-}
-
 func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 	if message.Info.Status != whatsapp.Read {
 		h.wac.Read(message.Info.RemoteJid, message.Info.Id)
 
-		_, err := h.db.Exec("CALL whatsapp.insert_text((?),(?),(?),from_unixtime((?)),(?))",
-			message.Info.Id,
-			message.Info.RemoteJid,
-			message.Info.FromMe,
-			message.Info.Timestamp,
-			url.QueryEscape(message.Text))
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error inserting: %T\n", err)
-			fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
-		}
-		h.NotifyHandlers(message.Info.Id, Text)
-		if h.startingTime != 0 &&
-			message.Info.Timestamp > h.startingTime &&
-			message.Text[0] == '!' {
+		if h.startingTime != 0 && message.Info.Timestamp > h.startingTime && message.Text[0] == '!' {
 			message.Info.Id = ""
 			message.Info.FromMe = true
 			message.Info.Timestamp = 0
@@ -317,96 +110,28 @@ func (h *handler) HandleTextMessage(message whatsapp.TextMessage) {
 	}
 }
 
-func (h *handler) NotifyHandlers(id string, t MessageType) {
-	msg := getMessageInfoFromDB(id)
-	switch t {
-	case Text:
-		for _, v := range h.handlers {
-			if v.Text {
-				v.Notify(msg)
-			}
-		}
-	case Image:
-		for _, v := range h.handlers {
-			if v.Image {
-				v.Notify(msg)
-			}
-		}
-	case Video:
-		for _, v := range h.handlers {
-			if v.Video {
-				v.Notify(msg)
-			}
-		}
-	case Audio:
-		for _, v := range h.handlers {
-			if v.Audio {
-				v.Notify(msg)
-			}
-		}
-	case Document:
-		for _, v := range h.handlers {
-			if v.Document {
-				v.Notify(msg)
-			}
-		}
-	}
-}
-
-func getMessageInfoFromDB(s string) []byte {
-	return []byte{2, 4, 5, 6}
-}
-
-func (m *MessageHandler) Notify(msg []byte) {
-	req, err := http.NewRequest("POST", m.Url, bytes.NewBuffer(msg))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		//cannot connect
+func (h *handler) HandleError(err error) {
+	if strings.Contains(err.Error(), whatsapp.ErrInvalidWsData.Error()) {
 		return
 	}
-	defer resp.Body.Close()
-
-	fmt.Println("response Status:", resp.Status)
-	fmt.Println("response Headers:", resp.Header)
-	body, _ := ioutil.ReadAll(resp.Body)
-	fmt.Println("response Body:", string(body))
-}
-
-func (h *handler) HandleError(err error) {
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-}
-
-func (h *handler) alreadyExists(id string) bool {
-	var count int
-	err := h.db.QueryRow("SELECT COUNT(*) FROM message_info WHERE id = (?)", id).Scan(&count)
+	session, err := h.wac.Disconnect()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sql error: %v\n", err)
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Error disconnecting: %v\n", err)
 	}
-
-	if count > 0 {
-		return true
+	if len(session.ClientToken) >= 10 {
+		err = writeSession(session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing Session: %v\n", err)
+		}
 	}
-	return false
-}
-
-func (h *handler) insertMedia(id, remotejid string, fromme bool, timestamp uint64, caption string, thumbnail []byte, mime string, data []byte) {
-	_, err := h.db.Exec("CALL whatsapp.insert_media((?),(?),(?),from_unixtime((?)),(?),(?),(?),(?))",
-		id,
-		remotejid,
-		fromme,
-		timestamp,
-		caption,
-		thumbnail,
-		mime,
-		data)
+	fmt.Println("Waiting for reconnect")
+	<-time.After(30 * time.Second)
+	fmt.Println("Reconnecting")
+	err = h.wac.Restore()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error inserting: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error restoring session: %v\n", err)
 	}
-	fmt.Printf("downloaded media: %v  %v\n", time.Unix(int64(timestamp), 0), remotejid)
 }
 
 func login(wac *whatsapp.Conn) error {
@@ -414,7 +139,7 @@ func login(wac *whatsapp.Conn) error {
 	session, err := readSession()
 	if err == nil {
 		//restore session
-		session, err = wac.RestoreSession(session)
+		session, err = wac.RestoreWithSession(session)
 		if err != nil {
 			return fmt.Errorf("restoring failed: %v\n", err)
 		}
@@ -441,7 +166,7 @@ func login(wac *whatsapp.Conn) error {
 
 func readSession() (whatsapp.Session, error) {
 	session := whatsapp.Session{}
-	file, err := os.Open(os.TempDir() + "/whatsappSession.gob")
+	file, err := os.Open("whatsappSession.gob")
 	if err != nil {
 		return session, err
 	}
@@ -455,17 +180,13 @@ func readSession() (whatsapp.Session, error) {
 }
 
 func writeSession(session whatsapp.Session) error {
-	file, err := os.Create(os.TempDir() + "/whatsappSession.gob")
-	jfile, err := os.Create(os.TempDir() + "/whatsappSession.json")
+	file, err := os.Create("whatsappSession.gob")
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	defer jfile.Close()
 	encoder := gob.NewEncoder(file)
-	jencoder := json.NewEncoder(jfile)
 	err = encoder.Encode(session)
-	err = jencoder.Encode(session)
 	if err != nil {
 		return err
 	}
